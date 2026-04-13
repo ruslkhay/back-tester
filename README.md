@@ -82,3 +82,36 @@ Back-tester:
 ```
 build/bin/back-tester
 ```
+
+## Contributing
+
+Install PDM, create a virtual environment, and install the project dependencies:
+
+```bash
+curl -sSL https://pdm-project.org/install-pdm.py | python3 -
+pdm install
+```
+
+Then activate the virtual environment and set up the git pre-commit hooks:
+
+```bash
+eval $(pdm venv activate)
+pre-commit install
+```
+
+After that, formatting and linting will run automatically before each commit.  
+If the source code does not meet the required formatting rules, the hook will 
+modify the files and stop the commit, and you will need to stage the updated 
+changes manually.
+
+To run formatting and linting yourself, use one of these commands:
+
+```bash
+pre-commit run --files file.py
+pre-commit run --all-files
+```
+
+The current pre-commit hooks do the following:
+- format and lint C++ code with `clang-format`;
+- format and lint Python code with `ruff`;
+- strip outputs from Jupyter notebooks.
