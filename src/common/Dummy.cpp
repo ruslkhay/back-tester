@@ -2,6 +2,4 @@
 
 #include "common/BasicTypes.hpp"
 
-namespace cmf {
-
-}
+namespace cmf {}
