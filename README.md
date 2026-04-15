@@ -85,17 +85,17 @@ build/bin/back-tester
 
 ## Contributing
 
-Install PDM, create a virtual environment, and install the project dependencies:
+Install UV, create a virtual environment, and install the project dependencies:
 
 ```bash
-curl -sSL https://pdm-project.org/install-pdm.py | python3 -
-pdm install
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
 ```
 
 Then activate the virtual environment and set up the git pre-commit hooks:
 
 ```bash
-eval $(pdm venv activate)
+source .venv/bin/activate
 pre-commit install
 ```
 
