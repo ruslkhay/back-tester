@@ -33,21 +33,21 @@ uint64_t isoToNanos(const std::string &iso_str) {
          nanos;
 }
 
-MarketDataEvent::Action actionFromString(const std::string &str) {
+Action actionFromString(const std::string &str) {
   if (str == "A")
-    return MarketDataEvent::Action::Add;
+    return Action::Add;
   else if (str == "M")
-    return MarketDataEvent::Action::Modify;
+    return Action::Modify;
   else if (str == "C")
-    return MarketDataEvent::Action::Cancel;
+    return Action::Cancel;
   else if (str == "R")
-    return MarketDataEvent::Action::Clear;
+    return Action::Clear;
   else if (str == "T")
-    return MarketDataEvent::Action::Trade;
+    return Action::Trade;
   else if (str == "F")
-    return MarketDataEvent::Action::Fill;
+    return Action::Fill;
   else
-    return MarketDataEvent::Action::None;
+    return Action::None;
 }
 
 std::optional<MarketDataEvent> parseNDJSON(const std::string &line) {
@@ -57,24 +57,24 @@ std::optional<MarketDataEvent> parseNDJSON(const std::string &line) {
     auto hd = j.at("hd");
 
     // Databento Rule: sort_ts = ts_recv (if exists) else ts_event
+    event.sort_ts = (event.ts_recv != 0) ? event.ts_recv : event.ts_event;
     event.ts_recv = isoToNanos(j.value("ts_recv", ""));
     event.ts_event = isoToNanos(hd.value("ts_event", ""));
-    event.sort_ts = (event.ts_recv != 0) ? event.ts_recv : event.ts_event;
-    event.order_id = std::stoull(
-        j.at("order_id").get<std::string>()); // Handle "order_id" as string
+    event.rtype = hd.value("rtype", RType::MBP_0);
+    event.publisher_id = hd.value("publisher_id", 0u);
+    event.instrument_id = hd.value("instrument_id", 0u);
+    event.action = actionFromString(j.at("action").get<std::string>());
+    event.side =
+        (j.at("side").get<std::string>() == "B" ? Side::Bid : Side::Ask);
     event.price =
         static_cast<int64_t>(std::stod(j.at("price").get<std::string>()) *
                              1e9); // Decimal to fixed-point
-    event.ts_in_delta = j.value("ts_in_delta", 0);
-    event.publisher_id = hd.value("publisher_id", 0u);
-    event.instrument_id = hd.value("instrument_id", 0u);
-    event.side =
-        (j.at("side").get<std::string>() == "B" ? MarketDataEvent::Side::Bid
-                                                : MarketDataEvent::Side::Ask);
-    event.action = actionFromString(j.at("action").get<std::string>());
-    event.flag = j.value("flags", MarketDataEvent::Flag::None);
-    event.rtype = hd.value("rtype", MarketDataEvent::RType::MBP_0);
     event.size = j.value("size", 0u);
+    event.channel_id = j.value("channel_id", 0u);
+    event.order_id = std::stoull(
+        j.at("order_id").get<std::string>()); // Handle "order_id" as string
+    event.flag = j.value("flags", Flag::None);
+    event.ts_in_delta = j.value("ts_in_delta", 0);
 
     return event;
   } catch (...) {
