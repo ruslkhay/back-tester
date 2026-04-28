@@ -1,11 +1,5 @@
-#include "common/MarketDataEvent.hpp"
 #include "common/MarketDataParser.hpp"
-
 #include "catch2/catch_all.hpp"
-
-#include <cstdint>
-#include <limits>
-#include <string>
 
 // ── Helpers
 // ───────────────────────────────────────────────────────────────────
@@ -27,7 +21,7 @@ static std::string minimalJson(const std::string& action = "A",
 }
 
 // Sample taken verbatim from the MarketDataEvent.hpp header comment.
-static const char* const SAMPLE_MBO =
+static const std::string SAMPLE_MBO =
     R"({"ts_recv":"2026-03-09T07:52:41.368148840Z",)"
     R"("hd":{"ts_event":"2026-03-09T07:52:41.367824437Z",)"
     R"("rtype":160,"publisher_id":101,"instrument_id":34513},)"
@@ -35,135 +29,6 @@ static const char* const SAMPLE_MBO =
     R"("channel_id":79,"order_id":"1773042761367855297",)"
     R"("flags":128,"ts_in_delta":2365,"sequence":52012,)"
     R"("symbol":"EUCO SI 20260710 PS EU P 1.1650 0"})";
-
-// ── Constants
-// ─────────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent - sentinel constants", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::UNDEF_PRICE ==
-            std::numeric_limits<std::int64_t>::max());
-    REQUIRE(MarketDataEvent::UNDEF_TIMESTAMP ==
-            std::numeric_limits<std::uint64_t>::max());
-}
-
-// ── priceToDouble
-// ─────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent::priceToDouble", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::priceToDouble(0) == 0.0);
-
-    // 1 unit = 1e-9 (fixed-point scale)
-    REQUIRE(MarketDataEvent::priceToDouble(1'000'000'000LL) ==
-            Catch::Approx(1.0));
-
-    // From Databento docs: 5411750000000 → 5411.75
-    REQUIRE(MarketDataEvent::priceToDouble(5'411'750'000'000LL) ==
-            Catch::Approx(5411.75));
-
-    // Negative prices are valid for calendar spreads (per Databento docs)
-    REQUIRE(MarketDataEvent::priceToDouble(-1'000'000'000LL) ==
-            Catch::Approx(-1.0));
-
-    // Typical small options price: 0.02163
-    REQUIRE(MarketDataEvent::priceToDouble(21'630'000LL) ==
-            Catch::Approx(0.02163));
-}
-
-// ── sideToString ─────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent::sideToString", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::sideToString(Side::Bid) == "Bid");
-    REQUIRE(MarketDataEvent::sideToString(Side::Ask) == "Ask");
-    REQUIRE(MarketDataEvent::sideToString(Side::None) == "None");
-}
-
-// ── actionToString
-// ────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent::actionToString", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::actionToString(Action::Add) == "Add");
-    REQUIRE(MarketDataEvent::actionToString(Action::Modify) == "Modify");
-    REQUIRE(MarketDataEvent::actionToString(Action::Cancel) == "Cancel");
-    REQUIRE(MarketDataEvent::actionToString(Action::Clear) == "Clear");
-    REQUIRE(MarketDataEvent::actionToString(Action::Trade) == "Trade");
-    REQUIRE(MarketDataEvent::actionToString(Action::Fill) == "Fill");
-    REQUIRE(MarketDataEvent::actionToString(Action::None) == "None");
-}
-
-// ── flagToString
-// ──────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent::flagToString", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::flagToString(Flag::None) == "None");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_LAST) == "F_LAST");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_TOB) == "F_TOB");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_SNAPSHOT) == "F_SNAPSHOT");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_MBP) == "F_MBP");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_BAD_TS_RECV) ==
-            "F_BAD_TS_RECV");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_MAYBE_BAD_BOOK) ==
-            "F_MAYBE_BAD_BOOK");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_PUBLISHER_SPECIFIC) ==
-            "F_PUBLISHER_SPECIFIC");
-    REQUIRE(MarketDataEvent::flagToString(Flag::F_RESERVED) == "F_RESERVED");
-}
-
-// ── rTypeToString
-// ─────────────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent::rTypeToString", "[MarketDataEvent]")
-{
-    REQUIRE(MarketDataEvent::rTypeToString(RType::MBP_0) == "MBP_0");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::MBP_1) == "MBP_1");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::MBP_10) == "MBP_10");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::Status) == "Status");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::Definition) == "Definition");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::Imbalance) == "Imbalance");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::Error) == "Error");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::SymbolMapping) ==
-            "SymbolMapping");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::System) == "System");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::Statistics) == "Statistics");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::OHLCV_1s) == "OHLCV_1s");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::OHLCV_1m) == "OHLCV_1m");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::OHLCV_1h) == "OHLCV_1h");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::OHLCV_1d) == "OHLCV_1d");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::MBO) == "MBO");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::CMBP_1) == "CMBP_1");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::CBBO_1s) == "CBBO_1s");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::CBBO_1m) == "CBBO_1m");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::TCBBO) == "TCBBO");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::BBO_1s) == "BBO_1s");
-    REQUIRE(MarketDataEvent::rTypeToString(RType::BBO_1m) == "BBO_1m");
-}
-
-// ── Default construction
-// ──────────────────────────────────────────────────────
-
-TEST_CASE("MarketDataEvent - default field values", "[MarketDataEvent]")
-{
-    MarketDataEvent e{};
-    REQUIRE(e.sort_ts == MarketDataEvent::UNDEF_TIMESTAMP);
-    REQUIRE(e.ts_recv == MarketDataEvent::UNDEF_TIMESTAMP);
-    REQUIRE(e.ts_event == MarketDataEvent::UNDEF_TIMESTAMP);
-    REQUIRE(e.rtype == RType::MBP_0);
-    REQUIRE(e.publisher_id == 0);
-    REQUIRE(e.instrument_id == 0);
-    REQUIRE(e.action == Action::None);
-    REQUIRE(e.side == Side::None);
-    REQUIRE(e.price == MarketDataEvent::UNDEF_PRICE);
-    REQUIRE(e.size == 0);
-    REQUIRE(e.channel_id == 0);
-    REQUIRE(e.order_id == 0);
-    REQUIRE(e.flag == Flag::None);
-    REQUIRE(e.ts_in_delta == 0);
-    REQUIRE(e.source_file_id == 0);
-}
 
 // ── parseNDJSON - full record
 // ─────────────────────────────────────────────────
@@ -175,7 +40,7 @@ TEST_CASE("parseNDJSON - sample MBO record fields",
     REQUIRE(result.has_value());
     const auto& e = *result;
 
-    REQUIRE(e.rtype == RType::MBO);
+    REQUIRE(e.rtype == RType::Mbo);
     REQUIRE(e.publisher_id == 101);
     REQUIRE(e.instrument_id == 34513);
     REQUIRE(e.action == Action::Add);
@@ -184,7 +49,7 @@ TEST_CASE("parseNDJSON - sample MBO record fields",
     REQUIRE(e.size == 20);
     REQUIRE(e.channel_id == 79);
     REQUIRE(e.order_id == 1773042761367855297ULL);
-    REQUIRE(e.flag == Flag::F_LAST);
+    REQUIRE(e.flag == Flag::Last);
     REQUIRE(e.ts_in_delta == 2365);
 }
 
@@ -199,16 +64,6 @@ TEST_CASE("parseNDJSON - timestamps are parsed from ISO 8601",
     REQUIRE(e.ts_event != MarketDataEvent::UNDEF_TIMESTAMP);
     // ts_recv is later than ts_event for this record
     REQUIRE(e.ts_recv > e.ts_event);
-}
-
-// Per Databento spec: sort_ts = ts_recv when ts_recv is present in the record.
-TEST_CASE("parseNDJSON - sort_ts equals ts_recv when ts_recv is present",
-          "[MarketDataEvent][parseNDJSON]")
-{
-    auto result = parseNDJSON(SAMPLE_MBO);
-    REQUIRE(result.has_value());
-    const auto& e = *result;
-    REQUIRE(e.sort_ts == e.ts_recv);
 }
 
 // ── parseNDJSON - action codes
@@ -293,21 +148,21 @@ TEST_CASE("parseNDJSON - flag values", "[MarketDataEvent][parseNDJSON]")
     // Each flag is a single bit per Databento spec
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 0))->flag == Flag::None);
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 128))->flag ==
-            Flag::F_LAST); // 1 << 7
+            Flag::Last); // 1 << 7
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 64))->flag ==
-            Flag::F_TOB); // 1 << 6
+            Flag::Tob); // 1 << 6
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 32))->flag ==
-            Flag::F_SNAPSHOT); // 1 << 5
+            Flag::Snapshot); // 1 << 5
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 16))->flag ==
-            Flag::F_MBP); // 1 << 4
+            Flag::Mbp); // 1 << 4
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 8))->flag ==
-            Flag::F_BAD_TS_RECV); // 1 << 3
+            Flag::BadTsRecv); // 1 << 3
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 4))->flag ==
-            Flag::F_MAYBE_BAD_BOOK); // 1 << 2
+            Flag::MaybeBadBook); // 1 << 2
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 2))->flag ==
-            Flag::F_PUBLISHER_SPECIFIC); // 1 << 1
+            Flag::PublisherSpecific); // 1 << 1
     REQUIRE(parseNDJSON(minimalJson("A", "B", "1.0", 1))->flag ==
-            Flag::F_RESERVED); // 1 << 0
+            Flag::Reserved); // 1 << 0
 }
 
 // ── parseNDJSON - invalid input

@@ -1,115 +1,171 @@
 #include "MarketDataEvent.hpp"
+#include "MarketDataParser.hpp"
 
-const std::string MarketDataEvent::sideToString(Side s) noexcept
+auto operator<<(std::ostream& os, const Side& s) -> std::ostream&
 {
     switch (s)
     {
     case Side::Bid:
-        return "Bid";
+        os << "Bid";
+        break;
     case Side::Ask:
-        return "Ask";
+        os << "Ask";
+        break;
     case Side::None:
-        return "None";
+        os << "None";
+        break;
     }
-
-    return "None";
+    return os;
 }
 
-const std::string MarketDataEvent::actionToString(Action a) noexcept
+auto operator<<(std::ostream& os, const Action& a) -> std::ostream&
 {
     switch (a)
     {
     case Action::Add:
-        return "Add";
+        os << "Add";
+        break;
     case Action::Modify:
-        return "Modify";
+        os << "Modify";
+        break;
     case Action::Cancel:
-        return "Cancel";
+        os << "Cancel";
+        break;
     case Action::Clear:
-        return "Clear";
+        os << "Clear";
+        break;
     case Action::Trade:
-        return "Trade";
+        os << "Trade";
+        break;
     case Action::Fill:
-        return "Fill";
+        os << "Fill";
+        break;
     case Action::None:
-        return "None";
+        os << "None";
+        break;
     }
-    return "None";
+    return os;
 }
 
-const std::string MarketDataEvent::flagToString(Flag f) noexcept
+auto operator<<(std::ostream& os, const Flag& f) -> std::ostream&
 {
     switch (f)
     {
     case Flag::None:
-        return "None";
-    case Flag::F_RESERVED:
-        return "F_RESERVED";
-    case Flag::F_PUBLISHER_SPECIFIC:
-        return "F_PUBLISHER_SPECIFIC";
-    case Flag::F_MAYBE_BAD_BOOK:
-        return "F_MAYBE_BAD_BOOK";
-    case Flag::F_BAD_TS_RECV:
-        return "F_BAD_TS_RECV";
-    case Flag::F_MBP:
-        return "F_MBP";
-    case Flag::F_SNAPSHOT:
-        return "F_SNAPSHOT";
-    case Flag::F_LAST:
-        return "F_LAST";
-    case Flag::F_TOB:
-        return "F_TOB";
+        os << "None";
+        break;
+    case Flag::Reserved:
+        os << "F_RESERVED";
+        break;
+    case Flag::PublisherSpecific:
+        os << "F_PUBLISHER_SPECIFIC";
+        break;
+    case Flag::MaybeBadBook:
+        os << "F_MAYBE_BAD_BOOK";
+        break;
+    case Flag::BadTsRecv:
+        os << "F_BAD_TS_RECV";
+        break;
+    case Flag::Mbp:
+        os << "F_MBP";
+        break;
+    case Flag::Snapshot:
+        os << "F_SNAPSHOT";
+        break;
+    case Flag::Tob:
+        os << "F_TOB";
+        break;
+    case Flag::Last:
+        os << "F_LAST";
+        break;
     }
-    return "None";
+    return os;
 }
 
-const std::string MarketDataEvent::rTypeToString(RType r) noexcept
+auto operator<<(std::ostream& os, const RType& r) -> std::ostream&
 {
     switch (r)
     {
-    case RType::MBP_0:
-        return "MBP_0";
-    case RType::MBP_1:
-        return "MBP_1";
-    case RType::MBP_10:
-        return "MBP_10";
+    case RType::Mbp0:
+        os << "MBP_0";
+        break;
+    case RType::Mbp1:
+        os << "MBP_1";
+        break;
+    case RType::Mbp10:
+        os << "MBP_10";
+        break;
     case RType::Status:
-        return "Status";
+        os << "Status";
+        break;
     case RType::Definition:
-        return "Definition";
+        os << "Definition";
+        break;
     case RType::Imbalance:
-        return "Imbalance";
+        os << "Imbalance";
+        break;
     case RType::Error:
-        return "Error";
+        os << "Error";
+        break;
     case RType::SymbolMapping:
-        return "SymbolMapping";
+        os << "SymbolMapping";
+        break;
     case RType::System:
-        return "System";
+        os << "System";
+        break;
     case RType::Statistics:
-        return "Statistics";
-    case RType::OHLCV_1s:
-        return "OHLCV_1s";
-    case RType::OHLCV_1m:
-        return "OHLCV_1m";
-    case RType::OHLCV_1h:
-        return "OHLCV_1h";
-    case RType::OHLCV_1d:
-        return "OHLCV_1d";
-    case RType::MBO:
-        return "MBO";
-    case RType::CMBP_1:
-        return "CMBP_1";
-    case RType::CBBO_1s:
-        return "CBBO_1s";
-    case RType::CBBO_1m:
-        return "CBBO_1m";
-    case RType::TCBBO:
-        return "TCBBO";
-    case RType::BBO_1s:
-        return "BBO_1s";
-    case RType::BBO_1m:
-        return "BBO_1m";
+        os << "Statistics";
+        break;
+    case RType::Ohlcv1s:
+        os << "OHLCV_1s";
+        break;
+    case RType::Ohlcv1m:
+        os << "OHLCV_1m";
+        break;
+    case RType::Ohlcv1h:
+        os << "OHLCV_1h";
+        break;
+    case RType::Ohlcv1d:
+        os << "OHLCV_1d";
+        break;
+    case RType::Mbo:
+        os << "MBO";
+        break;
+    case RType::Cmbp1:
+        os << "CMBP_1";
+        break;
+    case RType::Cbbo1s:
+        os << "CBBO_1s";
+        break;
+    case RType::Cbbo1m:
+        os << "CBBO_1m";
+        break;
+    case RType::Tcbbo:
+        os << "TCBBO";
+        break;
+    case RType::Bbo1s:
+        os << "BBO_1s";
+        break;
+    case RType::Bbo1m:
+        os << "BBO_1m";
+        break;
     }
+    return os;
+}
 
-    return "None";
-};
+auto operator<<(std::ostream& os, const MarketDataEvent& e) -> std::ostream&
+{
+    os << "ts_recv=" << nanosToIso(e.ts_recv) << ", "
+       << " ts_event=" << nanosToIso(e.ts_event) << ", "
+       << " rtype=" << e.rtype << ", "
+       << " publisher=" << e.publisher_id << ", "
+       << " instrument=" << e.instrument_id << ", "
+       << " action=" << e.action << ", "
+       << " side=" << e.side << ", "
+       << " price=" << e.price << ", "
+       << " size=" << e.size << ", "
+       << " order_id=" << e.order_id << ", "
+       << " flag=" << e.flag << ", "
+       << " ts_in_delta=" << e.ts_in_delta;
+    return os;
+}

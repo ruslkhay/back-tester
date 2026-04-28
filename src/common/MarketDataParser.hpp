@@ -4,4 +4,6 @@
 #include <optional>
 #include <string>
 
-std::optional<MarketDataEvent> parseNDJSON(const std::string& line);
+auto parseNDJSON(const std::string& line) -> std::optional<MarketDataEvent>;
+
+auto nanosToIso(std::uint64_t ns) -> std::string;
