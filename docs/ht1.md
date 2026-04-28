@@ -11,7 +11,7 @@ all $N$ queues. It extracts the message with the absolute minimum timestamp
 across all active queues and pushes it to a single chronological dispatch queue.
 4.  **Event Dispatching (Consumer):** A singular dispatcher thread consumes the
 merged queue. It constructs the `MarketDataEvent` and sequentially invokes
-`processMarketDataEvent` to update the Limit Order Book (LOB). Sequential
+`ProcessMarketDataEvent` to update the Limit Order Book (LOB). Sequential
 execution here is mandatory to maintain LOB state determinism.
 
 ### Parallelism Concepts
@@ -52,7 +52,7 @@ graph TD
     QN --> M
     M -->|Min Timestamp| DQ[Merged Queue]
     DQ --> DT([Dispatcher Thread])
-    DT -->|MarketDataEvent| CB[[processMarketDataEvent]]
+    DT -->|MarketDataEvent| CB[[ProcessMarketDataEvent]]
     end
 ```
 

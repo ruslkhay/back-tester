@@ -43,9 +43,9 @@ auto ListNDJSONFiles(const std::string& folder_path) -> std::vector<std::string>
 namespace
 {
 
-using Queue_t = ThreadSafeQueue<MarketDataEvent>;
+using queue_t = ThreadSafeQueue<MarketDataEvent>;
 
-static void ProducerThread(const std::string& file_path, Queue_t& queue)
+static void ProducerThread(const std::string& file_path, queue_t& queue)
 {
     std::ifstream file{file_path};
     if (!file.is_open())
@@ -88,13 +88,13 @@ void FlatMergerEngine::Ingest(
         return;
 
     // Create queues
-    std::vector<std::unique_ptr<Queue_t>> producer_queues;
+    std::vector<std::unique_ptr<queue_t>> producer_queues;
     for (std::size_t i = 0; i < file_paths.size(); ++i)
     {
-        producer_queues.push_back(std::make_unique<Queue_t>());
+        producer_queues.push_back(std::make_unique<queue_t>());
     }
 
-    auto merged_queue = std::make_unique<Queue_t>();
+    auto merged_queue = std::make_unique<queue_t>();
 
     // Thread management
     std::vector<std::jthread> threads;
@@ -155,15 +155,15 @@ void HierarchyMergerEngine::Ingest(
     if (file_paths.empty())
         return;
 
-    std::vector<std::unique_ptr<Queue_t>> queues;
+    std::vector<std::unique_ptr<queue_t>> queues;
     std::vector<std::jthread> threads;
 
     // Create producer queues
     queues.reserve(file_paths.size() + file_paths.size()); // approximate reservation
     for (const auto& file_path : file_paths)
     {
-        auto q = std::make_unique<Queue_t>();
-        Queue_t* q_ptr = q.get();
+        auto q = std::make_unique<queue_t>();
+        queue_t* q_ptr = q.get();
         queues.push_back(std::move(q));
         threads.emplace_back(ProducerThread, file_path, std::ref(*q_ptr));
     }
@@ -187,7 +187,7 @@ void HierarchyMergerEngine::Ingest(
 
             // Create output queue for this merger
             std::size_t out_idx = queues.size();
-            queues.push_back(std::make_unique<Queue_t>());
+            queues.push_back(std::make_unique<queue_t>());
             next_level.push_back(out_idx);
 
             // Start 2-way merger thread (lambda captures indices and queues)
