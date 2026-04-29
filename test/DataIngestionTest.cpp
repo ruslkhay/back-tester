@@ -2,10 +2,14 @@
 #include "common/MarketDataParser.hpp"
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <set>
 #include <sstream>
+#include <unistd.h>
 #include <vector>
 
 // Helper to generate a minimal valid NDJSON line
@@ -24,14 +28,40 @@ static auto MakeNDJSON(uint64_t ts_event_ns, uint64_t ts_recv_ns, uint64_t order
 // Helper to write NDJSON lines to a temp file
 static auto WriteTempNDJSON(const std::vector<std::string>& lines) -> std::string
 {
-    std::string filename = std::tmpnam(nullptr);
-    std::ofstream file{filename};
+    // Create template for mkstemp in system temp directory (XXXXXX must be at end)
+    std::string temp_template = std::filesystem::temp_directory_path().string() + "/ndjson_XXXXXX";
+    std::vector<char> temp_path(temp_template.begin(), temp_template.end());
+    temp_path.push_back('\0');
+
+    // mkstemp creates the file securely and returns a file descriptor
+    int fd = mkstemp(temp_path.data());
+    if (fd == -1)
+    {
+        throw std::runtime_error("Failed to create temporary file");
+    }
+
+    std::string temp_filename(temp_path.data());
+
+    // Convert file descriptor to FILE* for writing
+    FILE* cfile = fdopen(fd, "w");
+    if (!cfile)
+    {
+        close(fd);
+        throw std::runtime_error("Failed to open file descriptor");
+    }
+
     for (const auto& line : lines)
     {
-        file << line << "\n";
+        fprintf(cfile, "%s\n", line.c_str());
     }
-    file.close();
-    return filename;
+
+    fclose(cfile);
+
+    // Rename to add .json extension
+    std::string final_filename = temp_filename + ".json";
+    std::filesystem::rename(temp_filename, final_filename);
+
+    return final_filename;
 }
 
 // Helper to clean up temp file
@@ -43,24 +73,29 @@ static void RemoveTempFile(const std::string& filename)
 TEST_CASE("DataIngestion - FlatMerger single file", "[DataIngestion][FlatMerger]")
 {
     std::vector<std::string> ndjson;
-    for (int i = 0; i < 5; ++i)
+    size_t numEvents = 50;
+    uint64_t ts = 1000;
+    for (size_t i = 0; i < numEvents; ++i)
     {
-        ndjson.push_back(MakeNDJSON(1000 + i * 100, 1000 + i * 100, 1000 + i));
+        ts += i * 100; // 100ms apart
+        auto file = MakeNDJSON(ts, ts + 5, i);
+        ndjson.push_back(file);
     }
 
     std::string filename = WriteTempNDJSON(ndjson);
 
     std::vector<MarketDataEvent> events;
+    events.reserve(numEvents);
     FlatMergerEngine engine;
     engine.Ingest({filename}, [&](const MarketDataEvent& e)
                   { events.push_back(e); });
 
-    REQUIRE(events.size() == 5);
+    REQUIRE(events.size() == numEvents);
+    // Check that events are in chronological order
     for (std::size_t i = 0; i < events.size() - 1; ++i)
     {
         REQUIRE(events[i].ts_event <= events[i + 1].ts_event);
     }
-
     RemoveTempFile(filename);
 }
 
@@ -68,27 +103,33 @@ TEST_CASE("DataIngestion - FlatMerger two interleaved files", "[DataIngestion][F
 {
     // File 1: timestamps 1000, 3000, 5000, 7000, 9000
     std::vector<std::string> file1_ndjson;
-    for (int i = 0; i < 5; ++i)
+    size_t numEvents = 50;
+    uint64_t ts = 1000;
+    for (size_t i = 0; i < numEvents; ++i)
     {
-        file1_ndjson.push_back(MakeNDJSON(1000 + i * 2000, 1000 + i * 2000, 10000 + i));
+        file1_ndjson.push_back(MakeNDJSON(ts, ts + 5, i));
+        ts += 2000; // 2000ms apart
     }
 
     // File 2: timestamps 2000, 4000, 6000, 8000, 10000
     std::vector<std::string> file2_ndjson;
-    for (int i = 0; i < 5; ++i)
+    ts = 2000;
+    for (size_t i = 0; i < numEvents; ++i)
     {
-        file2_ndjson.push_back(MakeNDJSON(2000 + i * 2000, 2000 + i * 2000, 20000 + i));
+        file2_ndjson.push_back(MakeNDJSON(ts, ts + 5, 20000 + i));
+        ts += 2000; // 2000ms apart
     }
 
     std::string file1 = WriteTempNDJSON(file1_ndjson);
     std::string file2 = WriteTempNDJSON(file2_ndjson);
 
     std::vector<MarketDataEvent> events;
+    events.reserve(2 * numEvents);
     FlatMergerEngine engine;
     engine.Ingest({file1, file2}, [&](const MarketDataEvent& e)
                   { events.push_back(e); });
 
-    REQUIRE(events.size() == 10);
+    REQUIRE(events.size() == 2 * numEvents);
     for (std::size_t i = 0; i < events.size() - 1; ++i)
     {
         REQUIRE(events[i].ts_event <= events[i + 1].ts_event);
@@ -102,9 +143,9 @@ TEST_CASE("DataIngestion - FlatMerger empty file", "[DataIngestion][FlatMerger]"
 {
     std::vector<std::string> file1_ndjson;
     std::vector<std::string> file2_ndjson{
-        MakeNDJSON(1000, 1000, 1000),
-        MakeNDJSON(2000, 2000, 1001),
-        MakeNDJSON(3000, 3000, 1002)};
+        MakeNDJSON(1000, 1001, 1000),
+        MakeNDJSON(2000, 2001, 1001),
+        MakeNDJSON(3000, 3001, 1002)};
 
     std::string file1 = WriteTempNDJSON(file1_ndjson);
     std::string file2 = WriteTempNDJSON(file2_ndjson);
@@ -120,16 +161,17 @@ TEST_CASE("DataIngestion - FlatMerger empty file", "[DataIngestion][FlatMerger]"
     RemoveTempFile(file2);
 }
 
-TEST_CASE("DataIngestion - HierarchyMerger four files", "[DataIngestion][HierarchyMerger]")
+TEST_CASE("DataIngestion - HierarchyMerger multiple files", "[DataIngestion][HierarchyMerger]")
 {
     // Create 4 files with interleaved timestamps
     std::vector<std::string> files;
-    for (int f = 0; f < 4; ++f)
+    size_t numFiles = 40, numEventsPerFile = 500;
+    for (size_t f = 0; f < numFiles; ++f)
     {
         std::vector<std::string> ndjson;
-        for (int i = 0; i < 5; ++i)
+        for (size_t i = 0; i < numEventsPerFile; ++i)
         {
-            uint64_t ts = 1000 + (f * 5 + i) * 500;
+            uint64_t ts = 1000 + (f * numEventsPerFile + i) * 500;
             ndjson.push_back(MakeNDJSON(ts, ts, 10000 + f * 1000 + i));
         }
         files.push_back(WriteTempNDJSON(ndjson));
@@ -140,7 +182,7 @@ TEST_CASE("DataIngestion - HierarchyMerger four files", "[DataIngestion][Hierarc
     engine.Ingest(files, [&](const MarketDataEvent& e)
                   { events.push_back(e); });
 
-    REQUIRE(events.size() == 20);
+    REQUIRE(events.size() == numFiles * numEventsPerFile);
     for (std::size_t i = 0; i < events.size() - 1; ++i)
     {
         REQUIRE(events[i].ts_event <= events[i + 1].ts_event);
@@ -214,6 +256,14 @@ TEST_CASE("DataIngestion - Both strategies event count", "[DataIngestion]")
                        { hier_events.push_back(e); });
     REQUIRE(hier_events.size() == 7);
 
+    // Check that the events are the same
+    for (size_t i = 0; i < flat_events.size(); ++i)
+    {
+        REQUIRE(flat_events[i].ts_event == hier_events[i].ts_event);
+        REQUIRE(flat_events[i].ts_recv == hier_events[i].ts_recv);
+        REQUIRE(flat_events[i].order_id == hier_events[i].order_id);
+    }
+
     RemoveTempFile(file1);
     RemoveTempFile(file2);
 }
@@ -221,8 +271,8 @@ TEST_CASE("DataIngestion - Both strategies event count", "[DataIngestion]")
 TEST_CASE("DataIngestion - FlatMerger validation against merged.mbo.ndjson", "[DataIngestion][Validation]")
 {
     // Load test data directory
-    std::string test_dir = "test/data/T6R_407/1000_counts";
-    std::string merged_file = "test/data/T6R_407/merged.mbo.ndjson";
+    std::string test_dir = "../../test/data/T6R_407/1000_counts";
+    std::string merged_file = "../../test/data/T6R_407/merged.mbo.ndjson";
 
     // Check if test data exists
     if (!std::filesystem::exists(test_dir) || !std::filesystem::exists(merged_file))
@@ -300,13 +350,17 @@ TEST_CASE("DataIngestion - FlatMerger validation against merged.mbo.ndjson", "[D
 TEST_CASE("DataIngestion - HierarchyMerger validation against merged.mbo.ndjson", "[DataIngestion][Validation]")
 {
     // Load test data directory
-    std::string test_dir = "test/data/T6R_407/1000_counts";
-    std::string merged_file = "test/data/T6R_407/merged.mbo.ndjson";
+    std::string test_dir = "../../test/data/T6R_407/1000_counts";
+    std::string merged_file = "../../test/data/T6R_407/merged.mbo.ndjson";
 
     // Check if test data exists
-    if (!std::filesystem::exists(test_dir) || !std::filesystem::exists(merged_file))
+    if (!std::filesystem::exists(test_dir))
     {
-        SKIP("Test data directory or merged file not found");
+        SKIP("Test data directory not found");
+    }
+    if (!std::filesystem::exists(merged_file))
+    {
+        SKIP("Merged file not found");
     }
 
     // Collect files from 1000_counts directory
