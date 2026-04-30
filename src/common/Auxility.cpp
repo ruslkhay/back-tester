@@ -4,7 +4,6 @@
 #include <sstream>
 #include <unistd.h>
 
-// Helper to generate a minimal valid NDJSON line
 auto MakeNDJSON(uint64_t ts_event_ns, uint64_t ts_recv_ns, uint64_t order_id) -> std::string
 {
     auto ts_event_iso = nanosToIso(ts_event_ns);

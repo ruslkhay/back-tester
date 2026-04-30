@@ -2,6 +2,7 @@
 
 #include "common/LimitOrderBook.hpp"
 #include "common/MarketDataEvent.hpp"
+#include "common/MarketDataParser.hpp"
 #include "ingestion/DataIngestion.hpp"
 
 #include <chrono>
@@ -13,13 +14,13 @@
 #include <vector>
 
 // Print a snapshot for every tracked instrument.
-static void printAllBooks(
+static void PrintAllBooks(
     const std::unordered_map<uint32_t, LimitOrderBook>& books,
     std::size_t event_count)
 {
     std::cout << "\n[Snapshot at event " << event_count << "]\n";
     for (const auto& [id, book] : books)
-        book.printSnapshot(id, 5);
+        book.PrintSnapshot(id, 5);
 }
 
 int main(int argc, const char* argv[])
@@ -27,15 +28,12 @@ int main(int argc, const char* argv[])
     if (argc < 2)
     {
         std::cerr << "Usage: back-tester <path_to_ndjson_file>\n";
-        std::cerr << "Usage: back-tester <path_to_ndjson_file>\n";
         return 1;
     }
 
     std::ifstream file(argv[1]);
-    std::ifstream file(argv[1]);
     if (!file.is_open())
     {
-        std::cerr << "Error: could not open " << argv[1] << "\n";
         std::cerr << "Error: could not open " << argv[1] << "\n";
         return 1;
     }
@@ -70,14 +68,14 @@ int main(int argc, const char* argv[])
 
         // Route event to the correct book (create on first sight).
         const MarketDataEvent& ev = *ev_opt;
-        books[ev.instrument_id].applyEvent(ev);
+        books[ev.instrument_id].ApplyEvent(ev);
         ++total_events;
 
         // Intermediate snapshots.
         if (next_snapshot_idx < snapshot_at.size() &&
             total_events == snapshot_at[next_snapshot_idx])
         {
-            printAllBooks(books, total_events);
+            PrintAllBooks(books, total_events);
             ++next_snapshot_idx;
         }
     }
@@ -87,7 +85,7 @@ int main(int argc, const char* argv[])
         std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start).count();
 
     // ── Final snapshots ───────────────────────────────────────────────────────
-    printAllBooks(books, total_events);
+    PrintAllBooks(books, total_events);
 
     // ── Final best bid/ask per instrument ────────────────────────────────────
     std::cout << "\n--- Final Best Bid/Ask ---\n";
@@ -95,18 +93,20 @@ int main(int argc, const char* argv[])
     for (const auto& [id, book] : books)
     {
         std::cout << "  instrument_id=" << std::setw(8) << id << ":";
-        const auto bb = book.bestBid();
-        const auto ba = book.bestAsk();
+        const auto bb = book.BestBid();
+        const auto ba = book.BestAsk();
         if (bb)
             std::cout << "  bid=" << MarketDataEvent::priceToDouble(bb->first)
                       << " x " << bb->second;
         else
-            std::cout << "  bid=N/A";
+            continue;
+        // std::cout << "  bid=N/A";
         if (ba)
             std::cout << "  ask=" << MarketDataEvent::priceToDouble(ba->first)
                       << " x " << ba->second;
         else
-            std::cout << "  ask=N/A";
+            continue;
+        // std::cout << "  ask=N/A";
         std::cout << "\n";
     }
 
@@ -125,4 +125,3 @@ int main(int argc, const char* argv[])
 
     return 0;
 }
-

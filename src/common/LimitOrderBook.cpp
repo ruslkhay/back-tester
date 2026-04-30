@@ -6,37 +6,37 @@
 
 // ── L2 helpers ────────────────────────────────────────────────────────────────
 
-void LimitOrderBook::addToLevel(Side side, int64_t price, uint32_t qty)
+void LimitOrderBook::AddToLevel(Side side, int64_t price, uint32_t qty)
 {
     if (qty == 0)
         return;
     if (side == Side::Bid)
-        bids_[price] += qty;
+        _bids[price] += qty;
     else if (side == Side::Ask)
-        asks_[price] += qty;
+        _asks[price] += qty;
 }
 
-void LimitOrderBook::subtractFromLevel(Side side, int64_t price, uint32_t qty)
+void LimitOrderBook::SubtractFromLevel(Side side, int64_t price, uint32_t qty)
 {
     if (qty == 0)
         return;
     if (side == Side::Bid)
     {
-        auto it = bids_.find(price);
-        if (it == bids_.end())
+        auto it = _bids.find(price);
+        if (it == _bids.end())
             return;
         if (it->second <= qty)
-            bids_.erase(it);
+            _bids.erase(it);
         else
             it->second -= qty;
     }
     else if (side == Side::Ask)
     {
-        auto it = asks_.find(price);
-        if (it == asks_.end())
+        auto it = _asks.find(price);
+        if (it == _asks.end())
             return;
         if (it->second <= qty)
-            asks_.erase(it);
+            _asks.erase(it);
         else
             it->second -= qty;
     }
@@ -44,7 +44,7 @@ void LimitOrderBook::subtractFromLevel(Side side, int64_t price, uint32_t qty)
 
 // ── Event dispatch ─────────────────────────────────────────────────────────────
 
-void LimitOrderBook::applyEvent(const MarketDataEvent& event)
+void LimitOrderBook::ApplyEvent(const MarketDataEvent& event)
 {
     switch (event.action)
     {
@@ -52,75 +52,67 @@ void LimitOrderBook::applyEvent(const MarketDataEvent& event)
     {
         if (event.side == Side::None || event.size == 0)
             break;
-        orders_[event.order_id] = {event.side, event.price, event.size};
-        addToLevel(event.side, event.price, event.size);
+        _orders[event.order_id] = {event.side, event.price, event.size};
+        AddToLevel(event.side, event.price, event.size);
         break;
     }
 
     case Action::Cancel:
     {
-        // event.size = remaining qty after cancel (0 = fully cancelled)
-        auto it = orders_.find(event.order_id);
-        if (it == orders_.end())
+        auto it = _orders.find(event.order_id);
+        if (it == _orders.end())
             break;
         auto& e = it->second;
         uint32_t rem = event.size;
-        if (rem >= e.size)
-        {
-            subtractFromLevel(e.side, e.price, e.size);
-            orders_.erase(it);
-        }
-        else
-        {
-            subtractFromLevel(e.side, e.price, e.size - rem);
+        // Partial cancel if rem < e.size, otherwise remove the order
+        if (rem < e.size)
             e.size = rem;
-        }
+        else
+            _orders.erase(it);
+        SubtractFromLevel(e.side, e.price, e.size);
         break;
     }
 
     case Action::Modify:
     {
-        // event carries new price and new size
-        auto it = orders_.find(event.order_id);
-        if (it == orders_.end())
+        auto it = _orders.find(event.order_id);
+        if (it == _orders.end())
             break;
         auto& e = it->second;
-        subtractFromLevel(e.side, e.price, e.size);
+        SubtractFromLevel(e.side, e.price, e.size);
         e.price = event.price;
         e.size = event.size;
-        addToLevel(e.side, e.price, e.size);
+        AddToLevel(e.side, e.price, e.size);
         break;
     }
 
     case Action::Fill:
     {
-        // Resting order was partially or fully filled; event.size = remaining qty
-        auto it = orders_.find(event.order_id);
-        if (it == orders_.end())
+        auto it = _orders.find(event.order_id);
+        if (it == _orders.end())
             break;
         auto& e = it->second;
         uint32_t rem = event.size;
-        if (rem >= e.size)
+        if (rem == 0)
         {
-            subtractFromLevel(e.side, e.price, e.size);
-            orders_.erase(it);
+            SubtractFromLevel(e.side, e.price, e.size);
+            _orders.erase(it);
         }
-        else
+        else if (rem < e.size)
         {
-            subtractFromLevel(e.side, e.price, e.size - rem);
+            SubtractFromLevel(e.side, e.price, e.size - rem);
             e.size = rem;
         }
         break;
     }
 
     case Action::Trade:
-        // Aggressor-side trade — informational, resting book unchanged here.
         break;
 
     case Action::Clear:
-        orders_.clear();
-        bids_.clear();
-        asks_.clear();
+        _orders.clear();
+        _bids.clear();
+        _asks.clear();
         break;
 
     case Action::None:
@@ -130,41 +122,40 @@ void LimitOrderBook::applyEvent(const MarketDataEvent& event)
 
 // ── Queries ────────────────────────────────────────────────────────────────────
 
-std::optional<std::pair<int64_t, uint32_t>> LimitOrderBook::bestBid() const
+auto LimitOrderBook::BestBid() const -> std::optional<std::pair<int64_t, uint32_t>>
 {
-    if (bids_.empty())
+    if (_bids.empty())
         return std::nullopt;
-    auto it = bids_.begin();
+    auto it = _bids.begin();
     return std::make_pair(it->first, it->second);
 }
 
-std::optional<std::pair<int64_t, uint32_t>> LimitOrderBook::bestAsk() const
+auto LimitOrderBook::BestAsk() const -> std::optional<std::pair<int64_t, uint32_t>>
 {
-    if (asks_.empty())
+    if (_asks.empty())
         return std::nullopt;
-    auto it = asks_.begin();
+    auto it = _asks.begin();
     return std::make_pair(it->first, it->second);
 }
 
-uint32_t LimitOrderBook::volumeAtPrice(int64_t price) const
+auto LimitOrderBook::VolumeAtPrice(int64_t price) const -> uint32_t
 {
-    if (auto it = bids_.find(price); it != bids_.end())
+    if (auto it = _bids.find(price); it != _bids.end())
         return it->second;
-    if (auto it = asks_.find(price); it != asks_.end())
+    if (auto it = _asks.find(price); it != _asks.end())
         return it->second;
     return 0;
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
 
-void LimitOrderBook::printSnapshot(uint32_t instrument_id, int depth) const
+void LimitOrderBook::PrintSnapshot(uint32_t instrument_id, int depth) const
 {
     std::cout << std::fixed << std::setprecision(9);
     std::cout << "\n=== LOB [instrument_id=" << instrument_id << "] ===\n";
 
-    // Collect the first `depth` ask levels (ascending) and display highest first.
     std::vector<std::pair<int64_t, uint32_t>> ask_levels;
-    for (auto it = asks_.begin(); it != asks_.end() && (int)ask_levels.size() < depth; ++it)
+    for (auto it = _asks.begin(); it != _asks.end() && (int)ask_levels.size() < depth; ++it)
         ask_levels.emplace_back(it->first, it->second);
 
     for (auto it = ask_levels.rbegin(); it != ask_levels.rend(); ++it)
@@ -173,8 +164,8 @@ void LimitOrderBook::printSnapshot(uint32_t instrument_id, int depth) const
                   << "  x  " << it->second << "\n";
     }
 
-    auto bb = bestBid();
-    auto ba = bestAsk();
+    auto bb = BestBid();
+    auto ba = BestAsk();
     if (bb && ba)
     {
         double spread = MarketDataEvent::priceToDouble(ba->first - bb->first);
@@ -186,13 +177,13 @@ void LimitOrderBook::printSnapshot(uint32_t instrument_id, int depth) const
     }
 
     int count = 0;
-    for (auto it = bids_.begin(); it != bids_.end() && count < depth; ++it, ++count)
+    for (auto it = _bids.begin(); it != _bids.end() && count < depth; ++it, ++count)
     {
         std::cout << "  BID  " << std::setw(16) << MarketDataEvent::priceToDouble(it->first)
                   << "  x  " << it->second << "\n";
     }
 
-    std::cout << "  [orders=" << orders_.size()
-              << "  bid_levels=" << bids_.size()
-              << "  ask_levels=" << asks_.size() << "]\n";
+    std::cout << "  [orders=" << _orders.size()
+              << "  bid_levels=" << _bids.size()
+              << "  ask_levels=" << _asks.size() << "]\n";
 }
