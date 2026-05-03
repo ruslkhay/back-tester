@@ -47,7 +47,7 @@ int main(int argc, const char* argv[])
             std::cerr << "Error: no NDJSON files found in " << path << "\n";
             return 1;
         }
-        FlatMergerEngine engine;
+        HierarchyMergerEngine engine;
         std::vector<MarketDataEvent> events;
         const auto t0 = std::chrono::steady_clock::now();
         // engine.Ingest(files, ProcessMarketDataEvent);

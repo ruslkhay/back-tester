@@ -2,6 +2,7 @@
 #include "ThreadSafeQueue.hpp"
 #include "common/MarketDataParser.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -29,7 +30,6 @@ auto ListNDJSONFiles(const std::string& folder_path) -> std::vector<std::string>
     }
     catch (const std::filesystem::filesystem_error&)
     {
-        // Silently ignore directory iteration errors
     }
     return files;
 }
@@ -37,10 +37,13 @@ auto ListNDJSONFiles(const std::string& folder_path) -> std::vector<std::string>
 namespace
 {
 
-using queue_t = ThreadSafeQueue<MarketDataEvent>;
-constexpr std::size_t BATCH_SIZE = 1024;
+using batch_t = std::vector<MarketDataEvent>;
+using queue_t = BatchQueue<MarketDataEvent>;
 
-static void ProducerThread(const std::string& file_path, queue_t& queue)
+constexpr std::size_t BATCH_SIZE = 1024;
+constexpr std::size_t QUEUE_CAPACITY = 64;
+
+void ProducerThread(const std::string& file_path, queue_t& queue)
 {
     std::ifstream file{file_path};
     if (!file.is_open())
@@ -49,43 +52,84 @@ static void ProducerThread(const std::string& file_path, queue_t& queue)
         return;
     }
 
-    std::vector<MarketDataEvent> batch;
+    batch_t batch;
     batch.reserve(BATCH_SIZE);
 
     std::string line;
     while (std::getline(file, line))
     {
         auto event = parseNDJSON(line);
-        if (event)
+        if (!event)
+            continue;
+        batch.push_back(std::move(*event));
+        if (batch.size() >= BATCH_SIZE)
         {
-            batch.push_back(std::move(*event));
-            if (batch.size() >= BATCH_SIZE)
-            {
-                queue.PushBatch(batch);
-                batch.clear();
-            }
+            queue.Push(std::move(batch));
+            batch = batch_t{};
+            batch.reserve(BATCH_SIZE);
         }
     }
 
     if (!batch.empty())
-    {
-        queue.PushBatch(batch);
-    }
+        queue.Push(std::move(batch));
 
     queue.MarkDone();
 }
 
+// Holds a producer's current batch and a cursor into it. Refills from the
+// upstream queue when exhausted. Returns false when the source is fully drained.
+struct BatchCursor
+{
+    queue_t* source{nullptr};
+    batch_t current;
+    std::size_t pos{0};
+
+    auto Empty() const -> bool { return pos >= current.size(); }
+
+    auto Refill() -> bool
+    {
+        auto next = source->Pop();
+        if (!next)
+        {
+            current.clear();
+            pos = 0;
+            return false;
+        }
+        current = std::move(*next);
+        pos = 0;
+        return !current.empty();
+    }
+
+    auto Front() -> MarketDataEvent& { return current[pos]; }
+    void Advance() { ++pos; }
+};
+
 struct HeapItem
 {
     std::uint64_t ts_event;
-    MarketDataEvent event;
-    std::size_t queue_idx;
-
-    bool operator>(const HeapItem& other) const
-    {
-        return ts_event > other.ts_event;
-    }
+    std::size_t producer_idx;
+    bool operator>(const HeapItem& other) const { return ts_event > other.ts_event; }
 };
+
+// Pushes the merged_batch into out_queue when it reaches BATCH_SIZE.
+inline void EmitMerged(batch_t& merged_batch, queue_t& out_queue)
+{
+    if (merged_batch.size() >= BATCH_SIZE)
+    {
+        out_queue.Push(std::move(merged_batch));
+        merged_batch = batch_t{};
+        merged_batch.reserve(BATCH_SIZE);
+    }
+}
+
+void DispatcherLoop(queue_t& queue, EventCallback& on_event)
+{
+    while (auto batch = queue.Pop())
+    {
+        for (auto& event : *batch)
+            on_event(event);
+    }
+}
 
 } // namespace
 
@@ -96,85 +140,55 @@ void FlatMergerEngine::Ingest(
     if (file_paths.empty())
         return;
 
-    // Create queues
+    const std::size_t n = file_paths.size();
     std::vector<std::unique_ptr<queue_t>> producer_queues;
-    for (std::size_t i = 0; i < file_paths.size(); ++i)
-    {
-        producer_queues.push_back(std::make_unique<queue_t>());
-    }
+    producer_queues.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+        producer_queues.push_back(std::make_unique<queue_t>(QUEUE_CAPACITY));
 
-    auto merged_queue = std::make_unique<queue_t>();
+    auto merged_queue = std::make_unique<queue_t>(QUEUE_CAPACITY);
 
-    // Thread management
     std::vector<std::jthread> threads;
+    threads.reserve(n + 2);
 
-    // Start producer threads
-    for (std::size_t i = 0; i < file_paths.size(); ++i)
-    {
+    for (std::size_t i = 0; i < n; ++i)
         threads.emplace_back(ProducerThread, file_paths[i], std::ref(*producer_queues[i]));
-    }
 
-    // Start merger thread (lambda captures producer_queues)
-    threads.emplace_back([&producer_queues, &merged_queue]()
+    threads.emplace_back([&producer_queues, &merged_queue, n]()
                          {
+        std::vector<BatchCursor> cursors(n);
         std::priority_queue<HeapItem, std::vector<HeapItem>, std::greater<HeapItem>> heap;
-        std::vector<std::optional<MarketDataEvent>> pending(producer_queues.size());
 
-        // Initialize: pop first event from each queue
-        for (std::size_t i = 0; i < producer_queues.size(); ++i)
+        for (std::size_t i = 0; i < n; ++i)
         {
-            pending[i] = producer_queues[i]->BlockingPop();
-            if (pending[i])
-            {
-                heap.push(HeapItem{pending[i]->ts_event, std::move(*pending[i]), i});
-                pending[i].reset();
-            }
+            cursors[i].source = producer_queues[i].get();
+            if (cursors[i].Refill())
+                heap.push({cursors[i].Front().ts_event, i});
         }
 
-        std::vector<MarketDataEvent> merged_batch;
-        merged_batch.reserve(BATCH_SIZE);
+        batch_t merged;
+        merged.reserve(BATCH_SIZE);
 
         while (!heap.empty())
         {
-            auto [ts, event, idx] = heap.top();
+            auto top = heap.top();
             heap.pop();
-            merged_batch.push_back(std::move(event));
+            auto& cur = cursors[top.producer_idx];
+            merged.push_back(std::move(cur.Front()));
+            cur.Advance();
+            EmitMerged(merged, *merged_queue);
 
-            if (merged_batch.size() >= BATCH_SIZE)
-            {
-                merged_queue->PushBatch(merged_batch);
-                merged_batch.clear();
-            }
-
-            // Get next from same queue
-            auto next = producer_queues[idx]->BlockingPop();
-            if (next)
-            {
-                heap.push(HeapItem{next->ts_event, std::move(*next), idx});
-            }
+            if (cur.Empty() && !cur.Refill())
+                continue;
+            heap.push({cur.Front().ts_event, top.producer_idx});
         }
 
-        if (!merged_batch.empty())
-        {
-            merged_queue->PushBatch(merged_batch);
-        }
-
+        if (!merged.empty())
+            merged_queue->Push(std::move(merged));
         merged_queue->MarkDone(); });
 
-    // Start dispatcher thread (lambda captures merged_queue and on_event)
-    threads.emplace_back([&merged_queue, on_event]()
-                         {
-        std::vector<MarketDataEvent> batch;
-        while (merged_queue->PopBatch(batch, BATCH_SIZE) > 0)
-        {
-            for (const auto& event : batch)
-            {
-                on_event(event);
-            }
-        } });
-
-    // jthread destructors will join all threads in reverse order
-    // Destruction order: dispatcher (joined first) → merger → producers
+    threads.emplace_back([&merged_queue, &on_event]()
+                         { DispatcherLoop(*merged_queue, on_event); });
 }
 
 void HierarchyMergerEngine::Ingest(
@@ -184,101 +198,77 @@ void HierarchyMergerEngine::Ingest(
     if (file_paths.empty())
         return;
 
+    const std::size_t n = file_paths.size();
     std::vector<std::unique_ptr<queue_t>> queues;
+    queues.reserve(2 * n);
+    for (std::size_t i = 0; i < n; ++i)
+        queues.push_back(std::make_unique<queue_t>(QUEUE_CAPACITY));
+
     std::vector<std::jthread> threads;
+    threads.reserve(2 * n + 1);
 
-    // Create producer queues
-    queues.reserve(file_paths.size() + file_paths.size()); // approximate reservation
-    for (const auto& file_path : file_paths)
-    {
-        auto q = std::make_unique<queue_t>();
-        queue_t* q_ptr = q.get();
-        queues.push_back(std::move(q));
-        threads.emplace_back(ProducerThread, file_path, std::ref(*q_ptr));
-    }
+    for (std::size_t i = 0; i < n; ++i)
+        threads.emplace_back(ProducerThread, file_paths[i], std::ref(*queues[i]));
 
-    // Build merger tree layer by layer
     std::vector<std::size_t> current_level;
-    for (std::size_t i = 0; i < file_paths.size(); ++i)
-    {
+    current_level.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
         current_level.push_back(i);
-    }
 
     while (current_level.size() > 1)
     {
         std::vector<std::size_t> next_level;
+        next_level.reserve((current_level.size() + 1) / 2);
 
-        // Pair up queues and create 2-way merger threads
         for (std::size_t i = 0; i + 1 < current_level.size(); i += 2)
         {
-            std::size_t left_idx = current_level[i];
-            std::size_t right_idx = current_level[i + 1];
-
-            // Create output queue for this merger
-            std::size_t out_idx = queues.size();
-            queues.push_back(std::make_unique<queue_t>());
+            const std::size_t left_idx = current_level[i];
+            const std::size_t right_idx = current_level[i + 1];
+            const std::size_t out_idx = queues.size();
+            queues.push_back(std::make_unique<queue_t>(QUEUE_CAPACITY));
             next_level.push_back(out_idx);
 
-            // Start 2-way merger thread (lambda captures indices and queues)
             threads.emplace_back([&queues, left_idx, right_idx, out_idx]()
                                  {
-                auto a = queues[left_idx]->BlockingPop();
-                auto b = queues[right_idx]->BlockingPop();
+                BatchCursor a{queues[left_idx].get(), {}, 0};
+                BatchCursor b{queues[right_idx].get(), {}, 0};
+                a.Refill();
+                b.Refill();
 
-                while (a || b)
+                batch_t merged;
+                merged.reserve(BATCH_SIZE);
+
+                while (!a.Empty() || !b.Empty())
                 {
                     bool pick_left;
-                    if (!a)
-                    {
+                    if (a.Empty())
                         pick_left = false;
-                    }
-                    else if (!b)
-                    {
+                    else if (b.Empty())
                         pick_left = true;
-                    }
                     else
-                    {
-                        pick_left = (a->ts_event <= b->ts_event);
-                    }
+                        pick_left = a.Front().ts_event <= b.Front().ts_event;
 
-                    if (pick_left)
-                    {
-                        queues[out_idx]->Push(std::move(*a));
-                        a = queues[left_idx]->BlockingPop();
-                    }
-                    else
-                    {
-                        queues[out_idx]->Push(std::move(*b));
-                        b = queues[right_idx]->BlockingPop();
-                    }
+                    auto& src = pick_left ? a : b;
+                    merged.push_back(std::move(src.Front()));
+                    src.Advance();
+                    EmitMerged(merged, *queues[out_idx]);
+
+                    if (src.Empty())
+                        src.Refill();
                 }
 
+                if (!merged.empty())
+                    queues[out_idx]->Push(std::move(merged));
                 queues[out_idx]->MarkDone(); });
         }
 
-        // Handle odd queue (pass through to next level)
         if (current_level.size() % 2 == 1)
-        {
             next_level.push_back(current_level.back());
-        }
 
         current_level = std::move(next_level);
     }
 
-    // The root queue is at current_level[0]
-    std::size_t root_idx = current_level[0];
-
-    // Start dispatcher thread (lambda captures root_idx, queues, and on_event)
-    threads.emplace_back([&queues, root_idx, on_event]()
-                         {
-        std::vector<MarketDataEvent> batch;
-        while (queues[root_idx]->PopBatch(batch, BATCH_SIZE) > 0)
-        {
-            for (const auto& event : batch)
-            {
-                on_event(event);
-            }
-        } });
-
-    // jthread destructors will join all threads in reverse order
+    const std::size_t root_idx = current_level[0];
+    threads.emplace_back([&queues, root_idx, &on_event]()
+                         { DispatcherLoop(*queues[root_idx], on_event); });
 }

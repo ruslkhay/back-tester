@@ -6,7 +6,7 @@ authors = [
     {name = "CMF Team", email = "cmfteam2018@gmail.com"},
 ]
 dependencies = [
-    "pandas>=2.2.0"
+    "pandas>=2.2.0",
 ]
 
 requires-python = "==3.12.*"
@@ -20,4 +20,10 @@ distribution = false
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",
+]
+notebooks = [
+    "ipykernel>=6.0.0",
+    "matplotlib>=3.0.0",
+    "plotly>=5.0.0",
+    "nbformat>=4.2.0"
 ]
