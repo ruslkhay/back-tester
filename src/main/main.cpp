@@ -170,6 +170,10 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] const char* argv[])
         IngestionPipeline<parser_impl, decltype(push_fn)> pipeline(
             cfg.data_files[i], push_fn);
         pipeline.ingest();
+        // Flush the final partial batch BEFORE closing: BatchPusher::flush()
+        // skips closed queues, so closing first would silently drop the last
+        // (< BatchSize) events of every file.
+        batcher.flush();
         file_queues[i].close(); });
         }
 
