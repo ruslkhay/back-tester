@@ -321,3 +321,152 @@ TEST_CASE("MarketDataPublisher - publishSnapshot broadcasts without advancing "
     REQUIRE(got[5].seq() == 5);
     REQUIRE(pub.dropped(h) == 0);
 }
+
+TEST_CASE("MarketDataPublisher - per-instrument filter delivers only subscribed "
+          "instruments",
+          "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kWanted = 10;
+    constexpr uint32_t kOther = 20;
+
+    std::mutex m;
+    std::vector<uint32_t> seen;
+    std::atomic<int> received{0};
+
+    const feed::SubscriberHandle h = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            {
+                std::lock_guard lock(m);
+                seen.push_back(msg.instrument_id());
+            }
+            received.fetch_add(1, std::memory_order_release);
+        },
+        {kWanted}); // filter: only instrument 10
+
+    constexpr int N = 50;
+    for (int i = 0; i < N; ++i) // interleave wanted / other
+    {
+        pub.publishUpdate(feed::BookUpdate{0, i, kWanted, Side::Buy, 100, 1});
+        pub.publishUpdate(feed::BookUpdate{0, i, kOther, Side::Buy, 100, 1});
+    }
+
+    REQUIRE(wait_for([&]
+                     { return received.load() >= N; }));
+    // Filtered-out instruments are never enqueued, so the count settles at N.
+    std::lock_guard lock(m);
+    REQUIRE(seen.size() == static_cast<std::size_t>(N));
+    for (uint32_t id : seen)
+        REQUIRE(id == kWanted);
+    REQUIRE(pub.dropped(h) == 0); // filtering is not a drop
+}
+
+TEST_CASE("MarketDataPublisher - fans out to multiple subscribers independently",
+          "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kInstr = 5;
+
+    std::atomic<int> a_count{0};
+    std::atomic<int> b_count{0};
+    std::atomic<uint64_t> a_last{0};
+    std::atomic<uint64_t> b_last{0};
+    std::atomic<bool> a_ok{true};
+    std::atomic<bool> b_ok{true};
+
+    const feed::SubscriberHandle ha = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            const uint64_t s = msg.seq();
+            const uint64_t prev = a_last.exchange(s, std::memory_order_relaxed);
+            if (prev != 0 && s != prev + 1)
+                a_ok.store(false, std::memory_order_relaxed);
+            a_count.fetch_add(1, std::memory_order_relaxed);
+        },
+        {kInstr});
+    const feed::SubscriberHandle hb = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            const uint64_t s = msg.seq();
+            const uint64_t prev = b_last.exchange(s, std::memory_order_relaxed);
+            if (prev != 0 && s != prev + 1)
+                b_ok.store(false, std::memory_order_relaxed);
+            b_count.fetch_add(1, std::memory_order_relaxed);
+        },
+        {kInstr});
+
+    constexpr int N = 2000; // < queue capacity, so no drops for either
+    for (int i = 0; i < N; ++i)
+        pub.publishUpdate(feed::BookUpdate{0, i, kInstr, Side::Buy, 100, 1});
+
+    REQUIRE(wait_for([&]
+                     { return a_count.load() >= N && b_count.load() >= N; }));
+
+    // Both subscribers independently received every message, in order, no drops.
+    REQUIRE(a_count.load() == N);
+    REQUIRE(b_count.load() == N);
+    REQUIRE(a_ok.load());
+    REQUIRE(b_ok.load());
+    REQUIRE(pub.dropped(ha) == 0);
+    REQUIRE(pub.dropped(hb) == 0);
+
+    pub.shutdown(); // join workers before captured atomics go out of scope
+}
+
+TEST_CASE("MarketDataPublisher - stalled subscriber drops without blocking the "
+          "publisher, and the gap is detectable",
+          "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kInstr = 1;
+    constexpr int kCap = static_cast<int>(feed::kSubscriberQueueCap);
+
+    std::atomic<bool> blocked{true};
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> last{0};
+    std::atomic<bool> gap{false};
+
+    const feed::SubscriberHandle h = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            // Stall on the first message until released so the queue overflows.
+            while (blocked.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const uint64_t s = msg.seq();
+            const uint64_t prev = last.exchange(s, std::memory_order_relaxed);
+            if (prev != 0 && s != prev + 1)
+                gap.store(true, std::memory_order_relaxed);
+            count.fetch_add(1, std::memory_order_relaxed);
+        },
+        {kInstr});
+
+    // Phase 1: publish 2x capacity while stalled. The publisher must NOT block;
+    // the excess overflows the subscriber's queue and is dropped.
+    const int n1 = 2 * kCap;
+    for (int i = 0; i < n1; ++i)
+        pub.publishUpdate(feed::BookUpdate{0, i, kInstr, Side::Buy, 100, 1});
+    REQUIRE(pub.dropped(h) > 0); // overflow happened; publish loop didn't hang
+
+    // Release; the subscriber drains the buffered (contiguous) prefix.
+    blocked.store(false, std::memory_order_release);
+    REQUIRE(wait_for([&]
+                     { return count.load() >= static_cast<uint64_t>(kCap - 1); },
+                     std::chrono::seconds(10)));
+
+    // Phase 2: now-draining subscriber has room again; these later seqs land
+    // after the dropped region, so the subscriber observes a gap (seq jump).
+    const uint64_t seq_before = pub.current_seq(kInstr); // == n1
+    const int n2 = 200;
+    for (int i = 0; i < n2; ++i)
+        pub.publishUpdate(feed::BookUpdate{0, i, kInstr, Side::Buy, 100, 1});
+
+    REQUIRE(wait_for(
+        [&]
+        { return last.load() == seq_before + static_cast<uint64_t>(n2); },
+        std::chrono::seconds(10)));
+    REQUIRE(gap.load());         // subscriber detected the loss via seq numbers
+    REQUIRE(pub.dropped(h) > 0); // and the publisher surfaced it as drops
+
+    pub.shutdown();
+}
