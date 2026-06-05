@@ -6,6 +6,7 @@
 #include "ingestion/FlatMerger.hpp"
 #include "ingestion/IngestionPipeline.hpp"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <deque>
@@ -146,6 +147,35 @@ struct ProcessMarketDataEvent
 
   private:
 #if ENABLE_MARKET_DATA_FEED
+    // Build a top-N BookSnapshot for `instr` from current book state.  Runs on
+    // the dispatcher thread: side_levels() returns a span into the book's shared
+    // mutable cache, so the bid span is fully copied before the ask span is
+    // requested.
+    feed::BookSnapshot build_snapshot(uint32_t instr) const
+    {
+        feed::BookSnapshot snap{};
+        snap.instrument_id = instr;
+        const auto* book = order_book_router_.find_book(instr);
+        if (book == nullptr)
+            return snap;
+
+        const auto bids = book->side_levels(Side::Buy); // descending
+        const std::size_t nb = std::min(bids.size(), feed::kSnapshotDepth);
+        for (std::size_t i = 0; i < nb; ++i)
+            snap.bids[i] = feed::Level{bids[i].first,
+                                       static_cast<uint64_t>(bids[i].second)};
+        snap.bid_depth = static_cast<uint16_t>(nb);
+
+        const auto asks = book->side_levels(Side::Sell); // ascending
+        const std::size_t na = std::min(asks.size(), feed::kSnapshotDepth);
+        for (std::size_t i = 0; i < na; ++i)
+            snap.asks[i] = feed::Level{asks[i].first,
+                                       static_cast<uint64_t>(asks[i].second)};
+        snap.ask_depth = static_cast<uint16_t>(na);
+
+        return snap;
+    }
+
     // Derive feed messages from a just-applied event and publish them.  Runs on
     // the dispatcher thread (single producer), so reading book state is safe.
     void publish_feed(const MarketDataEvent& e)
@@ -176,8 +206,15 @@ struct ProcessMarketDataEvent
                 feed::Trade{0, e.ts_event, instr, e.side, e.price, e.size});
             break;
         case Action::Clear:
-            // Phase C: publish a fresh BookSnapshot here to resync subscribers.
+        {
+            // Book was just cleared: broadcast a fresh snapshot so subscribers
+            // resync (depths are 0 post-clear).  publishSnapshot stamps the seq
+            // it is consistent with and does not advance the counter.
+            feed::BookSnapshot snap = build_snapshot(instr);
+            snap.ts_event = e.ts_event;
+            publisher_.publishSnapshot(snap);
             break;
+        }
         default:
             break;
         }

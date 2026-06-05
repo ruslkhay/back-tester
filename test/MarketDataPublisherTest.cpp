@@ -205,3 +205,119 @@ TEST_CASE("MarketDataPublisher - unsubscribe stops delivery", "[Feed]")
 
     REQUIRE(count.load() == before);
 }
+
+TEST_CASE("MarketDataPublisher - subscribe mid-stream gets snapshot before "
+          "deltas",
+          "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kInstr = 42;
+
+    // Pre-stream: 500 updates advance the seq counter (no subscribers yet).
+    constexpr int kPre = 500;
+    for (int i = 0; i < kPre; ++i)
+        pub.publishUpdate(feed::BookUpdate{0, i, kInstr, Side::Buy, 100,
+                                           static_cast<uint64_t>(i)});
+    REQUIRE(pub.current_seq(kInstr) == kPre);
+
+    // A bootstrap snapshot consistent with the current seq.
+    feed::BookSnapshot snap{};
+    snap.instrument_id = kInstr;
+    snap.seq = pub.current_seq(kInstr); // 500
+    snap.bid_depth = 1;
+    snap.bids[0] = feed::Level{100, 42};
+
+    std::mutex m;
+    std::vector<feed::FeedMessage> got;
+    std::atomic<int> received{0};
+
+    // Single-threaded producer (this thread) => bootstrap + later deltas all
+    // push from one thread, satisfying the SPSC contract.
+    const feed::SubscriberHandle h = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            {
+                std::lock_guard lock(m);
+                got.push_back(msg);
+            }
+            received.fetch_add(1, std::memory_order_release);
+        },
+        {kInstr}, {feed::FeedMessage::make(snap)});
+
+    constexpr int kPost = 10;
+    for (int i = 0; i < kPost; ++i)
+        pub.publishUpdate(feed::BookUpdate{0, 1000 + i, kInstr, Side::Buy, 100,
+                                           static_cast<uint64_t>(1000 + i)});
+
+    REQUIRE(wait_for([&]
+                     { return received.load() >= 1 + kPost; }));
+    REQUIRE(pub.dropped(h) == 0);
+
+    std::lock_guard lock(m);
+    REQUIRE(got.size() == static_cast<std::size_t>(1 + kPost));
+    // Snapshot first, carrying seq 500.
+    REQUIRE(got[0].type == feed::FeedMsgType::Snapshot);
+    REQUIRE(got[0].seq() == static_cast<uint64_t>(kPre));
+    REQUIRE(got[0].snapshot.bid_depth == 1);
+    // Then deltas 501..510, contiguous (resume at snapshot.seq + 1).
+    for (int i = 0; i < kPost; ++i)
+    {
+        REQUIRE(got[static_cast<std::size_t>(1 + i)].type ==
+                feed::FeedMsgType::Update);
+        REQUIRE(got[static_cast<std::size_t>(1 + i)].seq() ==
+                static_cast<uint64_t>(kPre + 1 + i));
+    }
+}
+
+TEST_CASE("MarketDataPublisher - publishSnapshot broadcasts without advancing "
+          "seq",
+          "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kInstr = 7;
+
+    std::mutex m;
+    std::vector<feed::FeedMessage> got;
+    std::atomic<int> received{0};
+
+    const feed::SubscriberHandle h = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            {
+                std::lock_guard lock(m);
+                got.push_back(msg);
+            }
+            received.fetch_add(1, std::memory_order_release);
+        },
+        {kInstr});
+
+    for (int i = 0; i < 3; ++i) // seq -> 1, 2, 3
+        pub.publishUpdate(feed::BookUpdate{0, i, kInstr, Side::Sell, 200,
+                                           static_cast<uint64_t>(i)});
+    REQUIRE(pub.current_seq(kInstr) == 3);
+
+    feed::BookSnapshot snap{};
+    snap.instrument_id = kInstr;
+    pub.publishSnapshot(snap);             // stamps seq = current (3)
+    REQUIRE(pub.current_seq(kInstr) == 3); // snapshot does NOT advance the seq
+
+    for (int i = 0; i < 2; ++i) // seq -> 4, 5
+        pub.publishUpdate(feed::BookUpdate{0, 100 + i, kInstr, Side::Sell, 200,
+                                           static_cast<uint64_t>(i)});
+    REQUIRE(pub.current_seq(kInstr) == 5);
+
+    REQUIRE(wait_for([&]
+                     { return received.load() >= 6; })); // 3 + snap + 2
+
+    std::lock_guard lock(m);
+    REQUIRE(got.size() == 6);
+    REQUIRE(got[0].seq() == 1);
+    REQUIRE(got[1].seq() == 2);
+    REQUIRE(got[2].seq() == 3);
+    REQUIRE(got[3].type == feed::FeedMsgType::Snapshot);
+    REQUIRE(got[3].seq() == 3); // consistent with seq 3
+    REQUIRE(got[4].type == feed::FeedMsgType::Update);
+    REQUIRE(got[4].seq() == 4); // deltas resume contiguously
+    REQUIRE(got[5].seq() == 5);
+    REQUIRE(pub.dropped(h) == 0);
+}

@@ -17,11 +17,17 @@ MarketDataPublisher::~MarketDataPublisher() { shutdown(); }
 
 SubscriberHandle
 MarketDataPublisher::subscribe(Callback cb,
-                               std::unordered_set<uint32_t> instruments)
+                               std::unordered_set<uint32_t> instruments,
+                               std::vector<FeedMessage> bootstrap)
 {
     const uint64_t id = next_sub_id_.fetch_add(1, std::memory_order_relaxed);
     auto sub =
         std::make_shared<Subscriber>(id, std::move(cb), std::move(instruments));
+
+    // Enqueue bootstrap messages (e.g. a snapshot) BEFORE the subscriber joins
+    // active_, so they precede any live delta in its FIFO queue.
+    for (const FeedMessage& m : bootstrap)
+        enqueue(*sub, m);
 
     std::unique_lock lock(sub_mutex_);
     const std::shared_ptr<const SubVec> cur = active_.load();

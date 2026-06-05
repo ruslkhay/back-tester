@@ -47,8 +47,16 @@ class MarketDataPublisher
 
     // Register a subscriber.  Empty `instruments` => receive ALL instruments.
     // The callback runs on the subscriber's own worker thread.
+    //
+    // `bootstrap` messages (typically BookSnapshots) are enqueued into the new
+    // subscriber's queue BEFORE it joins the broadcast set, so they arrive
+    // ahead of any live delta -- the snapshot-then-deltas bootstrap pattern.
+    // Because each queue is SPSC, a non-empty `bootstrap` requires calling
+    // subscribe() on the producer thread (or before live publishing begins), so
+    // every push to this queue originates from a single thread.
     [[nodiscard]] SubscriberHandle
-    subscribe(Callback cb, std::unordered_set<uint32_t> instruments = {});
+    subscribe(Callback cb, std::unordered_set<uint32_t> instruments = {},
+              std::vector<FeedMessage> bootstrap = {});
 
     // Stop a subscriber: closes its queue (its worker drains and exits).
     void unsubscribe(const SubscriberHandle& h);
