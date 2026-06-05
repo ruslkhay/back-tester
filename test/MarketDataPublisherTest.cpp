@@ -470,3 +470,78 @@ TEST_CASE("MarketDataPublisher - stalled subscriber drops without blocking the "
 
     pub.shutdown();
 }
+
+TEST_CASE("MarketDataPublisher - subscribe/unsubscribe under load", "[Feed]")
+{
+    feed::MarketDataPublisher pub;
+    constexpr uint32_t kInstr = 1;
+
+    // A stable observer that stays subscribed for the whole run. It must keep
+    // receiving messages strictly in order while subscribers churn around it.
+    std::atomic<uint64_t> obs_count{0};
+    std::atomic<uint64_t> obs_last{0};
+    std::atomic<bool> reordered{false}; // a seq <= previous (FIFO violated)
+    std::atomic<bool> gap{false};       // a seq jump (a drop)
+    const feed::SubscriberHandle obs = pub.subscribe(
+        [&](const feed::FeedMessage& msg)
+        {
+            const uint64_t s = msg.seq();
+            const uint64_t prev = obs_last.exchange(s, std::memory_order_relaxed);
+            if (prev != 0)
+            {
+                if (s <= prev)
+                    reordered.store(true, std::memory_order_relaxed);
+                else if (s != prev + 1)
+                    gap.store(true, std::memory_order_relaxed);
+            }
+            obs_count.fetch_add(1, std::memory_order_relaxed);
+        },
+        {kInstr});
+
+    // The SINGLE producer thread (satisfies the per-queue SPSC contract: every
+    // push originates here, since churn subscribers carry no bootstrap).
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> published{0};
+    std::thread producer(
+        [&]
+        {
+            for (int64_t i = 0; !stop.load(std::memory_order_acquire); ++i)
+            {
+                pub.publishUpdate(
+                    feed::BookUpdate{0, i, kInstr, Side::Buy, 100, 1});
+                published.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+
+    // Control thread (this thread): hammer subscribe/unsubscribe concurrently
+    // with the live broadcast. If the COW swap or worker teardown were unsafe,
+    // this would crash, deadlock, or corrupt the observer's stream.
+    constexpr int kCycles = 3000;
+    std::atomic<uint64_t> churn_delivered{0};
+    for (int c = 0; c < kCycles; ++c)
+    {
+        const feed::SubscriberHandle tmp = pub.subscribe(
+            [&](const feed::FeedMessage&)
+            { churn_delivered.fetch_add(1, std::memory_order_relaxed); },
+            {kInstr});
+        pub.unsubscribe(tmp);
+    }
+
+    // Make sure real publishing overlapped the churn before we stop.
+    REQUIRE(wait_for([&]
+                     { return obs_count.load() > 1000; },
+                     std::chrono::seconds(10)));
+    stop.store(true, std::memory_order_release);
+    producer.join();
+
+    REQUIRE(published.load() > 0);
+    REQUIRE(obs_count.load() > 0);
+    // FIFO is never violated, churn or not: delivered seqs strictly increase.
+    REQUIRE_FALSE(reordered.load());
+    // The observer was never removed; if its queue never overflowed it saw every
+    // message with no gaps despite the concurrent subscribe/unsubscribe storm.
+    if (pub.dropped(obs) == 0)
+        REQUIRE_FALSE(gap.load());
+
+    pub.shutdown(); // all churn workers already joined; now join the observer
+}

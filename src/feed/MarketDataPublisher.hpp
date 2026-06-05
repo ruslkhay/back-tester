@@ -29,11 +29,14 @@ inline constexpr std::size_t kSubscriberQueueCap = 8192;
 //   - publishUpdate / publishTrade / publishSnapshot are called from a SINGLE
 //     producer thread (the dispatcher).  This is what makes the per-subscriber
 //     SPSC queues and the lock-free seq counters correct.
-//   - subscribe / unsubscribe are rare control-plane operations; they take a
-//     write lock and copy-on-write swap the immutable subscriber vector so the
-//     publish hot path never holds a mutex.
-//   - For Phase B, subscribe/unsubscribe are expected to happen before/after
-//     the publish stream, not concurrently with it.
+//   - subscribe / unsubscribe are rare control-plane operations driven from a
+//     single control thread; they take a write lock and copy-on-write swap the
+//     immutable subscriber vector so the publish hot path never holds a mutex.
+//     They MAY run concurrently with publishing: a broadcast holds its vector
+//     snapshot (shared_ptr) for the duration, so a subscriber removed mid-fanout
+//     stays alive until that snapshot drops, and enqueue() tolerates a queue
+//     closed mid-push (the message is dropped).
+//     (A subscribe() with a non-empty `bootstrap` is the exception -- see below.)
 class MarketDataPublisher
 {
   public:
@@ -156,7 +159,22 @@ class MarketDataPublisher
         if (s.queue.is_closed()) [[unlikely]]
             return;
         if (s.queue.size() < kSubscriberQueueCap - 1)
-            s.queue.push(m);
+        {
+            // The size check guarantees room (the consumer only frees slots), so
+            // push() won't spin; it can still throw "queue is closed" if
+            // unsubscribe() closed this queue between the checks above and here.
+            // That race is benign: push() tests closed_ before touching the ring,
+            // so the queue stays consistent, and the Subscriber is kept alive by
+            // the broadcast snapshot's shared_ptr (no use-after-free). The
+            // subscriber is going away, so the message is simply dropped.
+            try
+            {
+                s.queue.push(m);
+            }
+            catch (const std::runtime_error&)
+            {
+            }
+        }
         else
             s.dropped.fetch_add(1, std::memory_order_relaxed);
     }
