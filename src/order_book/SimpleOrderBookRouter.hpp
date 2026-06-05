@@ -23,6 +23,15 @@ class SimpleOrderBookRouter
     PmrUnorderedMap<uint32_t, BookType> order_books_;
     PmrUnorderedMap<uint64_t, uint32_t> order_to_instrument_;
 
+    // Records any new order_id -> instrument mapping and returns the resolved
+    // id (0 if unknown).  Single source of truth for apply_impl's resolution.
+    uint32_t resolve_for_apply(const MarketDataEvent& e)
+    {
+        if (e.instrument_id != 0 && e.order_id != 0)
+            order_to_instrument_[e.order_id] = e.instrument_id;
+        return order_to_instrument_[e.order_id];
+    }
+
   public:
 #if CMF_HAS_STD_PMR
     explicit SimpleOrderBookRouter(MemoryResource* mr = default_memory_resource())
@@ -35,10 +44,7 @@ class SimpleOrderBookRouter
 
     void apply_impl(const MarketDataEvent& e)
     {
-        if (e.instrument_id != 0 && e.order_id != 0)
-            order_to_instrument_[e.order_id] = e.instrument_id;
-
-        uint32_t instr_id = order_to_instrument_[e.order_id];
+        const uint32_t instr_id = resolve_for_apply(e);
 
         if (instr_id == 0 && e.order_id != 0) [[unlikely]]
         {
@@ -48,6 +54,35 @@ class SimpleOrderBookRouter
         }
 
         order_books_[instr_id].apply(e);
+    }
+
+    // Look up the book for a (resolved) instrument id; nullptr if none exists.
+    // Lets downstream consumers (e.g. the market-data feed) read book state to
+    // build snapshots and delta sizes.
+    [[nodiscard]] const BookType* find_book(uint32_t instrument_id) const
+    {
+        const auto it = order_books_.find(instrument_id);
+        return it == order_books_.end() ? nullptr : &it->second;
+    }
+
+    // Resolve the instrument id an event maps to.  Call AFTER apply(e) so any
+    // new order_id -> instrument mapping is already recorded.  Returns 0 if
+    // unresolved.  Const, non-mutating twin of resolve_for_apply(): cancels and
+    // modifies may carry instrument_id == 0 and rely on the order_id mapping.
+    [[nodiscard]] uint32_t resolved_instrument(const MarketDataEvent& e) const
+    {
+        if (e.instrument_id != 0)
+            return e.instrument_id;
+        const auto it = order_to_instrument_.find(e.order_id);
+        return it == order_to_instrument_.end() ? 0u : it->second;
+    }
+
+    // Invoke fn(uint32_t instrument_id, const BookType& book) for each book.
+    template <typename Fn>
+    void for_each_instrument(Fn&& fn) const
+    {
+        for (const auto& [instrument_id, order_book] : order_books_)
+            fn(instrument_id, order_book);
     }
 
     void print_snapshot_impl(std::ostream& out,

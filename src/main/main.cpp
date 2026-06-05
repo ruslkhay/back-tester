@@ -16,11 +16,19 @@
 #include <vector>
 
 #include "common/MarketDataEvent.hpp"
+#include "feed/MarketDataPublisher.hpp"
 #include "order_book/AbseilOrderBook.hpp"
 #include "order_book/BookAnomalyLog.hpp"
 #include "order_book/SimpleOrderBookRouter.hpp"
 
+#include <atomic>
+
 #define PROCESS_MARKET_DATA_EVENT_MODE 1 // 1 = COUNT mode, 2 = PRINT mode
+
+// Market-data feed (HW3 Group 2, inbound half): 1 = derive feed messages after
+// each event and publish them to subscribers; 0 = disabled (original behavior,
+// no feed threads, zero overhead).
+#define ENABLE_MARKET_DATA_FEED 1
 
 using namespace cmf;
 
@@ -57,13 +65,26 @@ struct BatchPusher
 
 struct ProcessMarketDataEvent
 {
-    ProcessMarketDataEvent() : counter_(0) {}
+    ProcessMarketDataEvent() : counter_(0)
+    {
+#if ENABLE_MARKET_DATA_FEED
+        // Phase B: a single demo subscriber (all instruments) that just counts
+        // delivered messages, to prove end-to-end fan-out and measure overhead.
+        demo_sub_ = publisher_.subscribe(
+            [this](const feed::FeedMessage&)
+            { feed_count_.fetch_add(1, std::memory_order_relaxed); });
+#endif
+    }
 
     BlockingQueue<std::string> print_queue;
 
     void operator()(const MarketDataEvent& e)
     {
         order_book_router_.apply(e);
+
+#if ENABLE_MARKET_DATA_FEED
+        publish_feed(e);
+#endif
 
 #if PROCESS_MARKET_DATA_EVENT_MODE == 1
         if (e.ts_recv > 0)
@@ -109,9 +130,71 @@ struct ProcessMarketDataEvent
         order_book_router_.print_best_bid_ask(cout);
     }
 
+#if ENABLE_MARKET_DATA_FEED
+    void print_feed_summary() const
+    {
+        std::printf("Feed messages delivered  : %" PRIu64 "\n",
+                    feed_count_.load(std::memory_order_acquire));
+        std::printf("Feed messages dropped    : %" PRIu64 "\n",
+                    publisher_.dropped(demo_sub_));
+    }
+
+    // Close subscriber queues and join worker threads.  Call after the event
+    // stream ends so no publish races a close.
+    void shutdown_feed() { publisher_.shutdown(); }
+#endif
+
   private:
+#if ENABLE_MARKET_DATA_FEED
+    // Derive feed messages from a just-applied event and publish them.  Runs on
+    // the dispatcher thread (single producer), so reading book state is safe.
+    void publish_feed(const MarketDataEvent& e)
+    {
+        const uint32_t instr = order_book_router_.resolved_instrument(e);
+        if (instr == 0)
+            return;
+
+        switch (e.action)
+        {
+        case Action::Add:
+        case Action::Modify:
+        case Action::Cancel:
+        {
+            // A cancel may carry no side / undefined price; skip what we can't
+            // attribute to a single level.
+            if (e.side == Side::None || !e.is_price_defined())
+                break;
+            const auto* book = order_book_router_.find_book(instr);
+            const uint64_t new_qty = book ? book->volume_at(e.side, e.price) : 0;
+            publisher_.publishUpdate(feed::BookUpdate{0, e.ts_event, instr,
+                                                      e.side, e.price, new_qty});
+            break;
+        }
+        case Action::Trade:
+        case Action::Fill:
+            publisher_.publishTrade(
+                feed::Trade{0, e.ts_event, instr, e.side, e.price, e.size});
+            break;
+        case Action::Clear:
+            // Phase C: publish a fresh BookSnapshot here to resync subscribers.
+            break;
+        default:
+            break;
+        }
+    }
+#endif
+
     mutable std::atomic_ullong counter_;
+#if ENABLE_MARKET_DATA_FEED
+    std::atomic_uint64_t feed_count_{0};
+    feed::SubscriberHandle demo_sub_;
+#endif
     cmf::SimpleOrderBookRouter<cmf::AbseilOrderBook> order_book_router_;
+#if ENABLE_MARKET_DATA_FEED
+    // Declared last -> destroyed first, so worker threads are joined while the
+    // counters/router they reference are still alive.
+    feed::MarketDataPublisher publisher_;
+#endif
 };
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] const char* argv[])
@@ -150,6 +233,11 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] const char* argv[])
 
 #if PROCESS_MARKET_DATA_EVENT_MODE == 1
       sink.summary(timer.elapsed_seconds());
+#endif
+
+#if ENABLE_MARKET_DATA_FEED
+      sink.print_feed_summary();
+      sink.shutdown_feed();
 #endif
 
       sink.print_best_bid_ask(std::cout);

@@ -24,6 +24,7 @@ target_link_libraries(${TARGET} PRIVATE
     Threads::Threads
     back-tester-ingestion
     back-tester-order-book
+    back-tester-feed
 )
 
 catch_discover_tests(${TARGET})
