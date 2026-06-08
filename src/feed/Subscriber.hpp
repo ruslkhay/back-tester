@@ -5,9 +5,7 @@
 namespace cmf::feed
 {
 
-// Opaque handle returned by MarketDataPublisher::subscribe().  The trading
-// engine keeps it and passes it back to unsubscribe().  An id of 0 is the
-// "invalid / not subscribed" sentinel.
+// Opaque handle from subscribe(); id 0 means invalid / not subscribed.
 struct SubscriberHandle
 {
     uint64_t id = 0;

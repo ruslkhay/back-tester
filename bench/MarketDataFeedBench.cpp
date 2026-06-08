@@ -17,9 +17,8 @@ using cmf::feed::BookUpdate;
 using cmf::feed::FeedMessage;
 using cmf::feed::MarketDataPublisher;
 
-// One counter per subscriber, each on its own cache line, so the worker threads
-// don't false-share while counting deliveries (keeps the bench measuring the
-// feed, not counter contention).
+// One counter per subscriber, each on its own cache line, so worker threads
+// don't false-share while counting deliveries.
 struct alignas(64) PaddedCounter
 {
     std::atomic<int64_t> v{0};
@@ -32,11 +31,9 @@ BookUpdate make_update(int64_t i, uint32_t instrument)
 
 } // namespace
 
-// Fan-out throughput: one producer (this thread) publishes N updates per
-// iteration; `Subscribers` worker threads (owned by the publisher) drain in
-// parallel.  The timed region covers publish + full delivery to every
-// subscriber.  N is kept below the queue capacity so nothing is dropped and the
-// drain always completes.
+// One producer publishes N updates per iteration; `Subscribers` worker threads
+// drain in parallel. The timed region covers publish + full delivery. N stays
+// below the queue capacity so nothing is dropped and the drain always completes.
 template <int Subscribers>
 static void BM_Feed_Throughput(benchmark::State& state)
 {
@@ -60,7 +57,6 @@ static void BM_Feed_Throughput(benchmark::State& state)
         for (int64_t i = 0; i < N; ++i)
             pub->publishUpdate(make_update(i, kInstr));
 
-        // Wait until every subscriber has drained this iteration's batch.
         for (int s = 0; s < Subscribers; ++s)
             while (counts[s].v.load(std::memory_order_acquire) < target[s])
                 benchmark::DoNotOptimize(counts[s].v.load());
@@ -71,13 +67,12 @@ static void BM_Feed_Throughput(benchmark::State& state)
 }
 
 // Cost of the per-message instrument filter: one subscriber whose filter holds
-// `FilterSize` instruments; every published update matches, so all are
-// delivered and the wants() set lookup is on the hot path.
+// `FilterSize` instruments, every update matching so the wants() lookup is hot.
 template <int FilterSize>
 static void BM_Feed_FilterCost(benchmark::State& state)
 {
     const int64_t N = state.range(0);
-    constexpr uint32_t kInstr = 1; // always present in the filter set
+    constexpr uint32_t kInstr = 1;
 
     std::unordered_set<uint32_t> filter;
     for (int i = 0; i < FilterSize; ++i)
@@ -103,8 +98,7 @@ static void BM_Feed_FilterCost(benchmark::State& state)
     pub->shutdown();
 }
 
-// 1 << 12 = 4096 < kSubscriberQueueCap (8192): the whole batch fits, so no drops
-// and the per-iteration drain always completes.
+// Arg 4096 < kSubscriberQueueCap (8192): the whole batch fits, so no drops.
 #define REGISTER_FEED_BENCH(BenchFn, Param, Label) \
     BENCHMARK_TEMPLATE(BenchFn, Param)             \
         ->Name(Label)                              \

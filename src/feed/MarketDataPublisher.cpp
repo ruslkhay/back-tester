@@ -8,8 +8,6 @@ namespace cmf::feed
 
 MarketDataPublisher::MarketDataPublisher()
 {
-    // Start with an empty (non-null) subscriber vector so the hot path never
-    // sees a null snapshot.
     active_.store(std::make_shared<SubVec>());
 }
 
@@ -24,15 +22,13 @@ MarketDataPublisher::subscribe(Callback cb,
     auto sub =
         std::make_shared<Subscriber>(id, std::move(cb), std::move(instruments));
 
-    // Enqueue bootstrap messages (e.g. a snapshot) BEFORE the subscriber joins
-    // active_, so they precede any live delta in its FIFO queue.
+    // Enqueue bootstrap before the subscriber joins active_, so it precedes any
+    // live delta in the FIFO queue.
     for (const FeedMessage& m : bootstrap)
         enqueue(*sub, m);
 
     std::unique_lock lock(sub_mutex_);
-    const std::shared_ptr<const SubVec> cur = active_.load();
-    auto next =
-        cur ? std::make_shared<SubVec>(*cur) : std::make_shared<SubVec>();
+    auto next = std::make_shared<SubVec>(*active_.load());
     next->push_back(std::move(sub));
     active_.store(std::move(next));
     return SubscriberHandle{id};
@@ -44,8 +40,6 @@ void MarketDataPublisher::unsubscribe(const SubscriberHandle& h)
     {
         std::unique_lock lock(sub_mutex_);
         const std::shared_ptr<const SubVec> cur = active_.load();
-        if (!cur)
-            return;
         auto next = std::make_shared<SubVec>();
         next->reserve(cur->size());
         for (const auto& s : *cur)
@@ -57,19 +51,15 @@ void MarketDataPublisher::unsubscribe(const SubscriberHandle& h)
         }
         active_.store(std::move(next));
     }
-    // Close outside the lock.  Once removed from `active_` no new messages are
-    // enqueued; close() makes the worker's pop() return false so its jthread
-    // exits.  The Subscriber is destroyed (joined) when the last ref drops.
+    // Closing makes the worker's pop() return false; the Subscriber is joined
+    // when the last reference (incl. any in-flight broadcast snapshot) drops.
     if (removed)
         removed->queue.close();
 }
 
 uint64_t MarketDataPublisher::dropped(const SubscriberHandle& h) const
 {
-    const std::shared_ptr<const SubVec> cur = active_.load();
-    if (!cur)
-        return 0;
-    for (const auto& s : *cur)
+    for (const auto& s : *active_.load())
         if (s->id == h.id)
             return s->dropped.load(std::memory_order_relaxed);
     return 0;
@@ -82,11 +72,6 @@ void MarketDataPublisher::shutdown()
         std::unique_lock lock(sub_mutex_);
         cur = active_.exchange(std::make_shared<SubVec>());
     }
-    if (!cur)
-        return;
-    // Close every queue so each worker's pop() returns false and its jthread
-    // exits.  Subscribers are destroyed (and their workers joined) when `cur`
-    // (and any in-flight broadcast snapshot) drops the last reference.
     for (const auto& s : *cur)
         s->queue.close();
 }
